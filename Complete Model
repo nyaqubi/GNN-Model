@@ -1,0 +1,135 @@
+import os
+import time
+import torch
+import mlflow
+
+# ── MLflow setup ──────────────────────────────────────────────────────────────
+mlflow.set_tracking_uri("file:///media/user/DataDisk/Python/Dordrecht/mlruns")
+mlflow.set_experiment("rainfall_gnn")
+
+# ── Run settings ──────────────────────────────────────────────────────────────
+EPOCHS = 50
+BEST_VAL = float("inf")
+BEST_EPOCH = 0
+BEST_VAL_MAE = None
+
+RUN_NAME = "model_02_live_training"
+
+# Use a NEW filename so you do not overwrite your previous model
+best_model_path = "/media/user/DataDisk/Python/Dordrecht/AI Model/GNN-model/best_model_run02.pt"
+full_checkpoint_path = "/media/user/DataDisk/Python/Dordrecht/AI Model/GNN-model/best_model_run02_full_checkpoint.pt"
+
+os.makedirs(os.path.dirname(best_model_path), exist_ok=True)
+
+with mlflow.start_run(run_name=RUN_NAME):
+
+    # ── Tags ──────────────────────────────────────────────────────────────────
+    mlflow.set_tag("model_family", "GNN")
+    mlflow.set_tag("run_type", "live_training")
+    mlflow.set_tag("target_variable", "RH")
+    mlflow.set_tag("data_source", "gnn_preprocessed.pkl")
+
+    # ── Parameters ────────────────────────────────────────────────────────────
+    mlflow.log_params({
+        "preprocessed_path": PREPROCESSED_PATH,
+        "split_path": SPLIT_PATH,
+        "window_size": config["window_size"],
+        "skip_threshold": config["skip_threshold"],
+        "min_bad_stations": config["min_bad_stations"],
+        "n_samples_total": len(dataset),
+        "n_train_samples": len(train_set),
+        "n_val_samples": len(val_set),
+        "n_test_samples": len(test_set),
+        "n_features": F,
+        "n_stations": N,
+        "hidden_dim": 64,
+        "gat_heads": 4,
+        "gat_out_dim": 32,
+        "dropout": 0.2,
+        "learning_rate": 0.001,
+        "batch_size": 32,
+        "epochs": EPOCHS,
+        "optimizer": optimizer.__class__.__name__,
+        "loss_function": criterion.__class__.__name__,
+        "train_start_date": str(dataset[split["train_indices"][0]].pred_date),
+        "train_end_date": str(dataset[split["train_indices"][-1]].pred_date),
+        "val_start_date": str(dataset[split["val_indices"][0]].pred_date),
+        "val_end_date": str(dataset[split["val_indices"][-1]].pred_date),
+        "test_start_date": str(dataset[split["test_indices"][0]].pred_date),
+        "test_end_date": str(dataset[split["test_indices"][-1]].pred_date),
+    })
+
+    t_start = time.time()
+
+    # ── Training loop ─────────────────────────────────────────────────────────
+    for epoch in range(1, EPOCHS + 1):
+        t_epoch = time.time()
+
+        train_loss, train_mae = train_one_epoch(model, train_loader, criterion, optimizer)
+        val_loss, val_mae = validate(model, val_loader, criterion)
+
+        epoch_time = time.time() - t_epoch
+
+        # Log per-epoch metrics
+        mlflow.log_metrics({
+            "train_loss": float(train_loss),
+            "train_mae": float(train_mae),
+            "val_loss": float(val_loss),
+            "val_mae": float(val_mae),
+            "epoch_time_s": float(epoch_time),
+        }, step=epoch)
+
+        # Save best model
+        if val_loss < BEST_VAL:
+            BEST_VAL = float(val_loss)
+            BEST_EPOCH = epoch
+            BEST_VAL_MAE = float(val_mae)
+
+            # Save weights only
+            torch.save(model.state_dict(), best_model_path)
+
+            # Save resumable full checkpoint
+            torch.save({
+                "epoch": epoch,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "best_val_loss": BEST_VAL,
+                "best_val_mae": BEST_VAL_MAE,
+                "config": config,
+                "n_features": F,
+                "n_stations": N,
+                "hidden_dim": 64,
+                "gat_heads": 4,
+                "gat_out_dim": 32,
+                "dropout": 0.2,
+                "learning_rate": 0.001,
+                "batch_size": 32,
+            }, full_checkpoint_path)
+
+        print(
+            f"Epoch {epoch:3d}/{EPOCHS} | "
+            f"train_loss {train_loss:.4f} | "
+            f"train_mae {train_mae:.4f} | "
+            f"val_loss {val_loss:.4f} | "
+            f"val_mae {val_mae:.4f} | "
+            f"time {epoch_time:.0f}s"
+        )
+
+    total_time = time.time() - t_start
+
+    # ── Final summary metrics ────────────────────────────────────────────────
+    mlflow.log_metrics({
+        "best_val_loss": BEST_VAL,
+        "best_epoch": BEST_EPOCH,
+        "best_val_mae": BEST_VAL_MAE,
+        "total_time_s": total_time,
+    })
+
+    # ── Log saved files as artifacts ─────────────────────────────────────────
+    mlflow.log_artifact(best_model_path, artifact_path="checkpoints")
+    mlflow.log_artifact(full_checkpoint_path, artifact_path="checkpoints")
+
+    print(f"\nDone — best val_loss {BEST_VAL:.4f} at epoch {BEST_EPOCH}")
+    print(f"Best val_mae : {BEST_VAL_MAE:.4f}")
+    print(f"Total time   : {total_time/60:.1f} mins")
+    print("Best model + MLflow logs saved ✅")
